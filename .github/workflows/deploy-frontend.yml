@@ -1,0 +1,77 @@
+name: Deploy Frontend to EC2
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  JAR_NAME: Frontend-0.0.1-SNAPSHOT.jar
+  APP_DIR: /opt/film-rental-frontend
+  SERVICE_NAME: film-rental-frontend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Set up JDK 17 ──
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # ── 3. Build JAR ──
+      - name: Build with Maven
+        run: ./mvnw clean package -DskipTests -B
+
+      # ── 4. Upload JAR as artifact ──
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-jar
+          path: target/${{ env.JAR_NAME }}
+          retention-days: 5
+
+      # ── 5. Copy JAR to EC2 via SCP ──
+      - name: Copy JAR to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.FRONTEND_EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: target/${{ env.JAR_NAME }}
+          target: /tmp/
+          strip_components: 1  # removes "target/" prefix
+
+      # ── 6. Deploy on EC2 via SSH ──
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.FRONTEND_EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: JAR_NAME,APP_DIR,SERVICE_NAME
+          script: |
+            set -e
+
+            # Ensure app directory exists
+            sudo mkdir -p $APP_DIR
+            sudo chown $USER:$USER $APP_DIR
+
+            # Move the new JAR into place
+            mv /tmp/$JAR_NAME $APP_DIR/$JAR_NAME
+
+            # Restart the systemd service
+            sudo systemctl restart $SERVICE_NAME
+            sudo systemctl enable $SERVICE_NAME
+
+            # Wait a few seconds and verify it started
+            sleep 5
+            sudo systemctl is-active --quiet $SERVICE_NAME && echo "✅ Frontend is running" || echo "❌ Frontend failed to start"
